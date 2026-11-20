@@ -27,6 +27,38 @@ export default function AccountPage() {
   const [previewEmailType, setPreviewEmailType] = useState<
     "encouragement" | "meeting" | null
   >(null);
+  const [emailSending, setEmailSending] = useState(false);
+  const [emailSentResult, setEmailSentResult] = useState<string | null>(null);
+
+  const handleSendRealEmail = async () => {
+    if (!user?.email) return;
+    setEmailSending(true);
+    setEmailSentResult(null);
+
+    try {
+      const res = await fetch("/api/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: user.email,
+          alias: user.anonymousAlias,
+          type: "encouragement",
+        }),
+      });
+      const data = await res.json();
+      if (data.delivered) {
+        setEmailSentResult(`Delivered to ${user.email}! Please check your inbox.`);
+      } else {
+        setEmailSentResult(
+          data.notice || "Email prepared! Set RESEND_API_KEY in Vercel for direct inbox dispatch."
+        );
+      }
+    } catch {
+      setEmailSentResult("Failed to send test email.");
+    } finally {
+      setEmailSending(false);
+    }
+  };
 
   const handleSaveAlias = (e: React.FormEvent) => {
     e.preventDefault();
@@ -181,6 +213,22 @@ export default function AccountPage() {
                   Registered Account
                 </span>
               </div>
+
+              {emailSentResult && (
+                <div className="my-2 rounded-xl border border-orange-200 bg-orange-50/70 p-2.5 text-xs text-[#FF5A00]">
+                  {emailSentResult}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleSendRealEmail}
+                disabled={emailSending}
+                className="mt-2 flex items-center justify-center gap-1.5 w-full rounded-2xl border border-neutral-200 bg-white py-2 text-xs font-semibold text-neutral-700 hover:border-[#FF5A00] hover:text-[#FF5A00] transition-colors cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5 text-[#FF5A00]" />
+                <span>{emailSending ? "Sending test..." : "Send Test Email to this Address"}</span>
+              </button>
 
               <p className="text-[11px] text-neutral-400 mt-2 leading-relaxed">
                 Your email is never shared, never displayed in community feeds,

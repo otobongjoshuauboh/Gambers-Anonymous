@@ -10,7 +10,7 @@ interface LiveAudioModalProps {
 }
 
 export default function LiveAudioModal({ onClose }: LiveAudioModalProps) {
-  const { activeAudioMeeting, completeMeeting, closeAudioMeeting } =
+  const { user, activeAudioMeeting, completeMeeting, closeAudioMeeting } =
     useRecovery();
   const [isMuted, setIsMuted] = useState(true);
 
@@ -28,46 +28,47 @@ export default function LiveAudioModal({ onClose }: LiveAudioModalProps) {
 
   const peers = [
     {
-      name: "Marcus T.",
-      tag: "Host",
+      name: "Circle Host",
+      tag: "Facilitator",
       isSpeaking: true,
       color: "#FF5A00",
-      days: "Day 42",
+      days: "Speaking",
     },
     {
-      name: "Sarah K.",
+      name: "Anonymous #218",
       tag: "Peer",
       isSpeaking: false,
       color: "#EA580C",
-      days: "Day 11",
+      days: "Listening",
     },
     {
-      name: "David O.",
-      tag: "Sponsor",
+      name: "Anonymous #509",
+      tag: "Peer",
       isSpeaking: false,
       color: "#C2410C",
-      days: "Day 128",
+      days: "Listening",
     },
     {
-      name: "Elena R.",
+      name: "Anonymous #741",
       tag: "Peer",
       isSpeaking: false,
       color: "#F97316",
-      days: "Day 5",
+      days: "Listening",
     },
     {
-      name: "Anon #312",
+      name: "Anonymous #312",
       tag: "Peer",
       isSpeaking: false,
       color: "#A3A3A3",
-      days: "Day 2",
+      days: "Listening",
     },
     {
-      name: "You",
+      name: user?.anonymousAlias || "You",
       tag: "Member",
       isSpeaking: !isMuted,
       color: "#FF5A00",
       isSelf: true,
+      days: "You",
     },
   ];
 

@@ -10,16 +10,15 @@ import React, {
 import {
   DAILY_MEETINGS,
   INITIAL_COMMUNITY_MESSAGES,
-  INITIAL_PEER_CHATS,
   type CommunityMessage,
   type MeetingSlot,
-  type PeerChat,
 } from "@/data/recoveryData";
 import {
   supabase,
   isSupabaseConfigured,
   type Profile,
   type GroupMessageRow,
+  type DirectMessageRow,
 } from "@/lib/supabase";
 
 export interface UserAccount {
@@ -32,6 +31,29 @@ export interface UserAccount {
   isAuthenticated: boolean;
   createdAt: string;
   streak_start?: string;
+}
+
+export interface DirectMsg {
+  id: string;
+  sender_id: string;
+  receiver_id: string;
+  content: string;
+  created_at: string;
+  isSelf?: boolean;
+  time: string;
+}
+
+export interface PeerConnection {
+  id: string;
+  peerId: string;
+  name: string;
+  avatarColor: string;
+  cleanDays: number;
+  isSponsor: boolean;
+  status: string;
+  lastMessage?: string;
+  lastTime?: string;
+  messages: DirectMsg[];
 }
 
 interface DayRecord {
@@ -74,9 +96,11 @@ interface RecoveryContextType {
   weekRecords: DayRecord[];
   communityMessages: CommunityMessage[];
   sendCommunityMessage: (text: string) => Promise<void>;
-  peerChats: PeerChat[];
-  sendPersonalMessage: (chatId: string, text: string) => void;
-  toggleSponsor: (chatId: string) => void;
+  connections: PeerConnection[];
+  addConnection: (peerAliasOrId: string) => Promise<{ success: boolean; message: string; connectionId?: string }>;
+  addDemoBuddy: () => void;
+  sendDirectMessage: (peerId: string, text: string) => Promise<void>;
+  toggleSponsor: (connectionId: string) => void;
   activeAudioMeeting: MeetingSlot | null;
   openAudioMeeting: (slot?: MeetingSlot) => void;
   closeAudioMeeting: () => void;
@@ -88,7 +112,7 @@ const STORAGE_KEY_USER = "recovery_user_account";
 const STORAGE_KEY_STREAK = "recovery_streak_count";
 const STORAGE_KEY_ATTENDED_TODAY = "recovery_attended_today";
 const STORAGE_KEY_COMMUNITY = "recovery_community_messages";
-const STORAGE_KEY_CHATS = "recovery_peer_chats";
+const STORAGE_KEY_CONNECTIONS = "recovery_real_connections";
 
 const RecoveryContext = createContext<RecoveryContextType | undefined>(
   undefined
@@ -102,7 +126,8 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
   const [communityMessages, setCommunityMessages] = useState<CommunityMessage[]>(
     INITIAL_COMMUNITY_MESSAGES
   );
-  const [peerChats, setPeerChats] = useState<PeerChat[]>(INITIAL_PEER_CHATS);
+  // Real peer connections (starts empty instead of forcing fake made-up users)
+  const [connections, setConnections] = useState<PeerConnection[]>([]);
   const [activeAudioMeeting, setActiveAudioMeeting] =
     useState<MeetingSlot | null>(null);
   const [activePeerChatId, setActivePeerChatId] = useState<string | null>(null);
@@ -119,7 +144,7 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // 1. Initial Load & Hydration (from Supabase if available, else localStorage)
+  // 1. Initial Load & Hydration
   useEffect(() => {
     queueMicrotask(async () => {
       try {
@@ -152,6 +177,83 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
                 createdAt: profile.created_at,
                 streak_start: profile.streak_start,
               });
+
+              // Fetch real user connections
+              const { data: connsData } = await supabase
+                .from("connections")
+                .select("id, user_a, user_b, created_at")
+                .or(`user_a.eq.${profile.id},user_b.eq.${profile.id}`);
+
+              if (connsData && connsData.length > 0) {
+                const partnerIds = connsData.map((c) =>
+                  c.user_a === profile.id ? c.user_b : c.user_a
+                );
+
+                const { data: profilesData } = await supabase
+                  .from("profiles")
+                  .select("*")
+                  .in("id", partnerIds);
+
+                const peerProfiles = (profilesData as Profile[]) || [];
+
+                // Fetch DMs between user and these partners
+                const { data: dmsData } = await supabase
+                  .from("direct_messages")
+                  .select("*")
+                  .or(`sender_id.eq.${profile.id},receiver_id.eq.${profile.id}`)
+                  .order("created_at", { ascending: true });
+
+                const allDMs = (dmsData as DirectMessageRow[]) || [];
+
+                const mappedConns: PeerConnection[] = connsData.map((c) => {
+                  const partnerId =
+                    c.user_a === profile.id ? c.user_b : c.user_a;
+                  const partner =
+                    peerProfiles.find((p) => p.id === partnerId) || {
+                      id: partnerId,
+                      alias: "Recovery Peer",
+                      streak_start: new Date().toISOString(),
+                    };
+
+                  const partnerDMs: DirectMsg[] = allDMs
+                    .filter(
+                      (m) =>
+                        (m.sender_id === profile.id &&
+                          m.receiver_id === partnerId) ||
+                        (m.sender_id === partnerId &&
+                          m.receiver_id === profile.id)
+                    )
+                    .map((m) => ({
+                      id: m.id,
+                      sender_id: m.sender_id,
+                      receiver_id: m.receiver_id,
+                      content: m.content,
+                      created_at: m.created_at,
+                      isSelf: m.sender_id === profile.id,
+                      time: new Date(m.created_at).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      }),
+                    }));
+
+                  const lastMsg = partnerDMs[partnerDMs.length - 1];
+
+                  return {
+                    id: c.id,
+                    peerId: partnerId,
+                    name: partner.alias,
+                    avatarColor: "#FF5A00",
+                    cleanDays: calculateStreakFromDate(partner.streak_start),
+                    isSponsor: false,
+                    status: "Connected Peer",
+                    lastMessage: lastMsg?.content || "Connected on Recovery",
+                    lastTime: lastMsg?.time || "Recently",
+                    messages: partnerDMs,
+                  };
+                });
+
+                setConnections(mappedConns);
+              }
             }
           }
 
@@ -180,12 +282,12 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
             setCommunityMessages(formatted);
           }
         } else {
-          // Supabase not configured yet: load from localStorage
+          // Local storage fallback
           const storedUser = localStorage.getItem(STORAGE_KEY_USER);
           const storedStreak = localStorage.getItem(STORAGE_KEY_STREAK);
           const storedAttended = localStorage.getItem(STORAGE_KEY_ATTENDED_TODAY);
           const storedComm = localStorage.getItem(STORAGE_KEY_COMMUNITY);
-          const storedChats = localStorage.getItem(STORAGE_KEY_CHATS);
+          const storedConns = localStorage.getItem(STORAGE_KEY_CONNECTIONS);
 
           if (storedUser) {
             try {
@@ -207,9 +309,9 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
               // fallback
             }
           }
-          if (storedChats) {
+          if (storedConns) {
             try {
-              setPeerChats(JSON.parse(storedChats));
+              setConnections(JSON.parse(storedConns));
             } catch {
               // fallback
             }
@@ -223,11 +325,12 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // 2. Realtime Subscription for Group Messages
+  // 2. Realtime Subscriptions for Group Messages & Direct Messages
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
+    if (!isSupabaseConfigured || !supabase || !user?.id) return;
 
-    const channel = supabase
+    // Group Messages Realtime
+    const groupChannel = supabase
       .channel("group_messages_realtime")
       .on(
         "postgres_changes",
@@ -244,7 +347,6 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
           });
 
           setCommunityMessages((prev) => {
-            // Prevent duplicate message if already added locally
             if (prev.some((m) => m.id === newRow.id)) return prev;
             return [
               ...prev,
@@ -255,7 +357,7 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
                 avatarColor: "#FF5A00",
                 text: newRow.content,
                 time: timeStr,
-                isSelf: user?.id === newRow.user_id,
+                isSelf: user.id === newRow.user_id,
               },
             ];
           });
@@ -263,9 +365,61 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
       )
       .subscribe();
 
+    // Direct Messages Realtime
+    const dmChannel = supabase
+      .channel("direct_messages_realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "direct_messages",
+        },
+        (payload) => {
+          const newDm = payload.new as DirectMessageRow;
+          if (newDm.sender_id !== user.id && newDm.receiver_id !== user.id) {
+            return;
+          }
+
+          const partnerId =
+            newDm.sender_id === user.id ? newDm.receiver_id : newDm.sender_id;
+          const timeStr = new Date(newDm.created_at).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+
+          const formattedDm: DirectMsg = {
+            id: newDm.id,
+            sender_id: newDm.sender_id,
+            receiver_id: newDm.receiver_id,
+            content: newDm.content,
+            created_at: newDm.created_at,
+            isSelf: newDm.sender_id === user.id,
+            time: timeStr,
+          };
+
+          setConnections((prev) =>
+            prev.map((conn) => {
+              if (conn.peerId === partnerId) {
+                if (conn.messages.some((m) => m.id === newDm.id)) return conn;
+                return {
+                  ...conn,
+                  lastMessage: newDm.content,
+                  lastTime: timeStr,
+                  messages: [...conn.messages, formattedDm],
+                };
+              }
+              return conn;
+            })
+          );
+        }
+      )
+      .subscribe();
+
     return () => {
       if (supabase) {
-        supabase.removeChannel(channel);
+        supabase.removeChannel(groupChannel);
+        supabase.removeChannel(dmChannel);
       }
     };
   }, [user?.id]);
@@ -288,13 +442,16 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
         STORAGE_KEY_COMMUNITY,
         JSON.stringify(communityMessages)
       );
-      localStorage.setItem(STORAGE_KEY_CHATS, JSON.stringify(peerChats));
+      localStorage.setItem(
+        STORAGE_KEY_CONNECTIONS,
+        JSON.stringify(connections)
+      );
     } catch {
       // Ignore storage errors
     }
-  }, [user, streak, attendedToday, communityMessages, peerChats, isHydrated]);
+  }, [user, streak, attendedToday, communityMessages, connections, isHydrated]);
 
-  // Auth: Sign Up with Supabase and insert Profile
+  // Auth: Sign Up with Supabase & Dispatch Welcome Email
   const signUp = useCallback(
     async (data: {
       email: string;
@@ -323,7 +480,6 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
 
         const userId = authData?.user?.id;
         if (userId) {
-          // Insert profile into public.profiles
           await supabase.from("profiles").upsert({
             id: userId,
             email,
@@ -344,6 +500,22 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
           };
           setUser(newUser);
           setStreak(1);
+
+          // Dispatch real welcome email via serverless API
+          try {
+            await fetch("/api/send-email", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                to: email,
+                alias,
+                type: "welcome",
+              }),
+            });
+          } catch {
+            // non-blocking
+          }
+
           return newUser;
         }
       }
@@ -360,12 +532,28 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
         streak_start: now,
       };
       setUser(newUser);
+
+      // Trigger email API even in local mode if network available
+      try {
+        await fetch("/api/send-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            to: email,
+            alias,
+            type: "welcome",
+          }),
+        });
+      } catch {
+        // non-blocking
+      }
+
       return newUser;
     },
     []
   );
 
-  // Auth: Log In with Supabase
+  // Auth: Log In
   const login = useCallback(
     async (email: string, password?: string, alias?: string) => {
       const cleanEmail = email.trim().toLowerCase();
@@ -431,6 +619,7 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
       await supabase.auth.signOut();
     }
     setUser(null);
+    setConnections([]);
   }, []);
 
   const updateNotificationPreferences = useCallback(
@@ -542,93 +731,247 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     [streak, user]
   );
 
-  const sendPersonalMessage = useCallback(
-    (chatId: string, text: string) => {
+  // Real Add Friend / Connection Logic (via Supabase or local buddy)
+  const addConnection = useCallback(
+    async (
+      peerAliasOrId: string
+    ): Promise<{ success: boolean; message: string; connectionId?: string }> => {
+      const cleanTarget = peerAliasOrId.trim();
+      if (!cleanTarget) {
+        return { success: false, message: "Please provide an alias or ID." };
+      }
+
+      if (
+        user?.anonymousAlias &&
+        cleanTarget.toLowerCase() === user.anonymousAlias.toLowerCase()
+      ) {
+        return { success: false, message: "You cannot add yourself as a buddy." };
+      }
+
+      if (isSupabaseConfigured && supabase && user?.id) {
+        // Query profiles for target peer
+        const { data: targetProfile } = await supabase
+          .from("profiles")
+          .select("*")
+          .or(`alias.ilike.${cleanTarget},id.eq.${cleanTarget}`)
+          .maybeSingle();
+
+        const peer = targetProfile as Profile | null;
+
+        if (!peer) {
+          return {
+            success: false,
+            message: `No recovery member found with alias "${cleanTarget}".`,
+          };
+        }
+
+        if (peer.id === user.id) {
+          return { success: false, message: "You cannot add yourself." };
+        }
+
+        // Insert connection
+        const { data: connData, error: connErr } = await supabase
+          .from("connections")
+          .insert({
+            user_a: user.id,
+            user_b: peer.id,
+          })
+          .select()
+          .single();
+
+        if (connErr) {
+          // If already connected, fetch existing
+          return {
+            success: true,
+            message: `Already connected with ${peer.alias}!`,
+            connectionId: peer.id,
+          };
+        }
+
+        const newConn: PeerConnection = {
+          id: connData?.id || peer.id,
+          peerId: peer.id,
+          name: peer.alias,
+          avatarColor: "#FF5A00",
+          cleanDays: calculateStreakFromDate(peer.streak_start),
+          isSponsor: false,
+          status: "Connected Peer",
+          lastMessage: "Connected on Recovery",
+          lastTime: "Just now",
+          messages: [],
+        };
+
+        setConnections((prev) => [newConn, ...prev]);
+        return {
+          success: true,
+          message: `Connected with ${peer.alias}!`,
+          connectionId: peer.id,
+        };
+      }
+
+      // Local connection support
+      const exists = connections.some(
+        (c) => c.name.toLowerCase() === cleanTarget.toLowerCase()
+      );
+      if (exists) {
+        return { success: true, message: `Already connected with ${cleanTarget}!` };
+      }
+
+      const localBuddy: PeerConnection = {
+        id: `peer-${Date.now()}`,
+        peerId: `peer-id-${Date.now()}`,
+        name: cleanTarget,
+        avatarColor: "#FF5A00",
+        cleanDays: 14,
+        isSponsor: false,
+        status: "Recovery Peer",
+        lastMessage: "Connected on Recovery",
+        lastTime: "Just now",
+        messages: [],
+      };
+
+      setConnections((prev) => [localBuddy, ...prev]);
+      return {
+        success: true,
+        message: `Connected with ${cleanTarget}!`,
+        connectionId: localBuddy.peerId,
+      };
+    },
+    [user, connections]
+  );
+
+  // Instant Demo Buddy for live testing
+  const addDemoBuddy = useCallback(() => {
+    const demoNames = ["TruthSeeker", "QuietCourage", "CleanPath", "RisingSun"];
+    const randomName =
+      demoNames[Math.floor(Math.random() * demoNames.length)] +
+      `#${Math.floor(100 + Math.random() * 900)}`;
+
+    const demoBuddy: PeerConnection = {
+      id: `demo-${Date.now()}`,
+      peerId: `demo-id-${Date.now()}`,
+      name: randomName,
+      avatarColor: "#FF5A00",
+      cleanDays: 18,
+      isSponsor: false,
+      status: "Active now",
+      lastMessage: "Hey! Glad we connected. How is your recovery going today?",
+      lastTime: "Just now",
+      messages: [
+        {
+          id: `msg-${Date.now()}`,
+          sender_id: `demo-id-${Date.now()}`,
+          receiver_id: user?.id || "me",
+          content:
+            "Hey! Glad we connected. How is your recovery going today?",
+          created_at: new Date().toISOString(),
+          isSelf: false,
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ],
+    };
+
+    setConnections((prev) => [demoBuddy, ...prev]);
+    setActivePeerChatId(demoBuddy.peerId);
+  }, [user?.id]);
+
+  // Real Direct Message Sending
+  const sendDirectMessage = useCallback(
+    async (peerId: string, text: string) => {
       if (!text.trim()) return;
+      const cleanText = text.trim();
       const now = new Date();
       const timeStr = now.toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
       });
 
-      const userMsg = {
-        id: `msg-me-${Date.now()}`,
-        sender: "me" as const,
-        text: text.trim(),
+      const userMsg: DirectMsg = {
+        id: `dm-${Date.now()}`,
+        sender_id: user?.id || "me",
+        receiver_id: peerId,
+        content: cleanText,
+        created_at: now.toISOString(),
+        isSelf: true,
         time: timeStr,
       };
 
-      setPeerChats((prev) =>
-        prev.map((c) => {
-          if (c.id === chatId) {
+      // Optimistic update
+      setConnections((prev) =>
+        prev.map((conn) => {
+          if (conn.peerId === peerId || conn.id === peerId) {
             return {
-              ...c,
-              status: "Active now",
-              messages: [...c.messages, userMsg],
+              ...conn,
+              lastMessage: cleanText,
+              lastTime: timeStr,
+              messages: [...conn.messages, userMsg],
             };
           }
-          return c;
+          return conn;
         })
       );
 
-      // Simulate a calm peer response after 1.8 seconds
+      // If Supabase connected, insert into direct_messages table
+      if (isSupabaseConfigured && supabase && user?.id) {
+        await supabase.from("direct_messages").insert({
+          sender_id: user.id,
+          receiver_id: peerId,
+          content: cleanText,
+        });
+        return;
+      }
+
+      // If demo buddy or local fallback, simulate buddy reply after 2 seconds
       setTimeout(() => {
         const replyTime = new Date().toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
         });
 
-        const peerReplies: Record<string, string[]> = {
-          "marcus-t": [
-            "Proud of you for reaching out. Staying in touch is key. Keep your head up today.",
-            "I hear you. Remember why you started this journey. We are in this together.",
-            "Good check in. Make sure to attend the 7 PM call tonight to ground yourself.",
-          ],
-          "sarah-k": [
-            "Thanks for checking in! That helps me stay accountable too.",
-            "We've got this! One craving at a time. It will pass.",
-            "I'm keeping my phone away from betting notifications today. Let's do this together.",
-          ],
-          "liam-m": [
-            "Appreciate the message man. Together we're much stronger than alone.",
-            "Glad you messaged. Staying honest today with every single choice.",
-          ],
-        };
-
-        const replies = peerReplies[chatId] || [
-          "Thank you for sharing with me. Stay strong today!",
+        const replies = [
+          "Proud of you for staying truthful today. That takes immense courage.",
+          "I hear you. If the urge creeps in, remember the 7:00 PM circle is open.",
+          "One day at a time brother. We're keeping each other accountable.",
+          "Smart move! Staying away from triggers is half the battle.",
         ];
         const randomReply =
           replies[Math.floor(Math.random() * replies.length)];
 
-        setPeerChats((currentChats) =>
-          currentChats.map((c) => {
-            if (c.id === chatId) {
+        const buddyReply: DirectMsg = {
+          id: `reply-${Date.now()}`,
+          sender_id: peerId,
+          receiver_id: user?.id || "me",
+          content: randomReply,
+          created_at: new Date().toISOString(),
+          isSelf: false,
+          time: replyTime,
+        };
+
+        setConnections((prev) =>
+          prev.map((conn) => {
+            if (conn.peerId === peerId || conn.id === peerId) {
               return {
-                ...c,
-                messages: [
-                  ...c.messages,
-                  {
-                    id: `msg-peer-${Date.now()}`,
-                    sender: "them" as const,
-                    text: randomReply,
-                    time: replyTime,
-                  },
-                ],
+                ...conn,
+                lastMessage: randomReply,
+                lastTime: replyTime,
+                messages: [...conn.messages, buddyReply],
               };
             }
-            return c;
+            return conn;
           })
         );
-      }, 1800);
+      }, 2000);
     },
-    []
+    [user]
   );
 
-  const toggleSponsor = useCallback((chatId: string) => {
-    setPeerChats((prev) =>
+  const toggleSponsor = useCallback((connectionId: string) => {
+    setConnections((prev) =>
       prev.map((c) => {
-        if (c.id === chatId) {
+        if (c.id === connectionId || c.peerId === connectionId) {
           return {
             ...c,
             isSponsor: !c.isSponsor,
@@ -676,8 +1019,10 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
         weekRecords,
         communityMessages,
         sendCommunityMessage,
-        peerChats,
-        sendPersonalMessage,
+        connections,
+        addConnection,
+        addDemoBuddy,
+        sendDirectMessage,
         toggleSponsor,
         activeAudioMeeting,
         openAudioMeeting,
