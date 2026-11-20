@@ -11,19 +11,22 @@ import {
   Lock,
   ArrowRight,
   Sparkles,
+  KeyRound,
 } from "lucide-react";
 import { useRecovery } from "@/context/RecoveryContext";
 
 export default function SignUpPage() {
   const router = useRouter();
-  const { signUp, login } = useRecovery();
+  const { signUp, login, isSupabaseConnected } = useRecovery();
 
   const [mode, setMode] = useState<"signup" | "login">("signup");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [alias, setAlias] = useState("");
   const [dailyEncouragement, setDailyEncouragement] = useState(true);
   const [meetingReminders, setMeetingReminders] = useState(true);
   const [submitted, setSubmitted] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   // Suggestions for anonymous alias
   const aliasSuggestions = [
@@ -41,27 +44,37 @@ export default function SignUpPage() {
     setAlias(random);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
+    setAuthError(null);
 
-    if (mode === "signup") {
-      const finalAlias =
-        alias.trim() || `Anonymous #${Math.floor(100 + Math.random() * 900)}`;
-      signUp({
-        email: email.trim(),
-        anonymousAlias: finalAlias,
-        dailyEncouragementEmail: dailyEncouragement,
-        meetingRemindersEmail: meetingReminders,
-      });
-    } else {
-      login(email.trim(), alias.trim());
+    try {
+      if (mode === "signup") {
+        const finalAlias =
+          alias.trim() || `Anonymous #${Math.floor(100 + Math.random() * 900)}`;
+        await signUp({
+          email: email.trim(),
+          password: password.trim() || undefined,
+          anonymousAlias: finalAlias,
+          dailyEncouragementEmail: dailyEncouragement,
+          meetingRemindersEmail: meetingReminders,
+        });
+      } else {
+        await login(email.trim(), password.trim() || undefined, alias.trim());
+      }
+
+      setSubmitted(true);
+      setTimeout(() => {
+        router.push("/dashboard");
+      }, 700);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        setAuthError(err.message);
+      } else {
+        setAuthError("Authentication failed. Please check your credentials.");
+      }
     }
-
-    setSubmitted(true);
-    setTimeout(() => {
-      router.push("/dashboard");
-    }, 900);
   };
 
   const handleGuestContinue = () => {
@@ -103,7 +116,10 @@ export default function SignUpPage() {
         <div className="mb-6 flex rounded-xl border border-neutral-200 p-1 bg-neutral-50/70">
           <button
             type="button"
-            onClick={() => setMode("signup")}
+            onClick={() => {
+              setMode("signup");
+              setAuthError(null);
+            }}
             className={`flex-1 rounded-lg py-2 text-xs font-bold transition-all cursor-pointer ${
               mode === "signup"
                 ? "bg-white text-[#FF5A00] shadow-xs"
@@ -114,7 +130,10 @@ export default function SignUpPage() {
           </button>
           <button
             type="button"
-            onClick={() => setMode("login")}
+            onClick={() => {
+              setMode("login");
+              setAuthError(null);
+            }}
             className={`flex-1 rounded-lg py-2 text-xs font-bold transition-all cursor-pointer ${
               mode === "login"
                 ? "bg-white text-[#FF5A00] shadow-xs"
@@ -124,6 +143,13 @@ export default function SignUpPage() {
             Log In
           </button>
         </div>
+
+        {/* Error notification */}
+        {authError && (
+          <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-xs text-red-600">
+            {authError}
+          </div>
+        )}
 
         {/* Auth Form */}
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -148,6 +174,27 @@ export default function SignUpPage() {
             <p className="text-[11px] text-neutral-400">
               Never displayed anywhere. Kept strictly confidential.
             </p>
+          </div>
+
+          {/* Password Input */}
+          <div className="flex flex-col gap-1.5">
+            <label
+              htmlFor="password-input"
+              className="text-xs font-semibold text-neutral-700 flex items-center gap-1.5"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-[#FF5A00]" />
+              <span>Password</span>
+            </label>
+            <input
+              id="password-input"
+              type="password"
+              required={isSupabaseConnected}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              minLength={6}
+              className="rounded-2xl border border-neutral-200 bg-white px-4 py-3 text-sm font-sans text-neutral-800 placeholder-neutral-400 focus:border-[#FF5A00] focus:outline-none transition-colors"
+            />
           </div>
 
           {/* Anonymous Alias (Only in Sign Up mode) */}

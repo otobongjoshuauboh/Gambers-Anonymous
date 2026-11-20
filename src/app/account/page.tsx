@@ -19,7 +19,8 @@ import BottomNav from "@/components/BottomNav";
 
 export default function AccountPage() {
   const router = useRouter();
-  const { user, updateNotificationPreferences, logout } = useRecovery();
+  const { user, updateNotificationPreferences, logout, isSupabaseConnected } =
+    useRecovery();
 
   const [alias, setAlias] = useState(user?.anonymousAlias || "Anonymous Peer");
   const [aliasSaved, setAliasSaved] = useState(false);
@@ -56,8 +57,8 @@ export default function AccountPage() {
     });
   };
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     router.push("/signup");
   };
 
@@ -86,7 +87,21 @@ export default function AccountPage() {
           <h1 className="font-serif text-3xl font-bold italic text-[#FF5A00] tracking-[-0.01em] mt-0.5">
             Your Account
           </h1>
-          <p className="text-xs font-sans text-neutral-500 mt-0.5">
+          <div className="flex items-center gap-2 mt-1">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isSupabaseConnected
+                  ? "bg-emerald-500 animate-pulse"
+                  : "bg-neutral-300"
+              }`}
+            />
+            <span className="text-[11px] text-neutral-400">
+              {isSupabaseConnected
+                ? "Supabase Realtime Cloud Connected"
+                : "Local Mode (Connect Supabase for multi-device sync)"}
+            </span>
+          </div>
+          <p className="text-xs font-sans text-neutral-500 mt-1">
             Manage your anonymous identity and recovery notifications.
           </p>
         </header>

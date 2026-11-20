@@ -15,8 +15,15 @@ import {
   type MeetingSlot,
   type PeerChat,
 } from "@/data/recoveryData";
+import {
+  supabase,
+  isSupabaseConfigured,
+  type Profile,
+  type GroupMessageRow,
+} from "@/lib/supabase";
 
 export interface UserAccount {
+  id?: string;
   email: string;
   anonymousAlias: string;
   dailyEncouragementEmail: boolean;
@@ -24,6 +31,7 @@ export interface UserAccount {
   appPushReminders: boolean;
   isAuthenticated: boolean;
   createdAt: string;
+  streak_start?: string;
 }
 
 interface DayRecord {
@@ -35,15 +43,17 @@ interface DayRecord {
 
 interface RecoveryContextType {
   user: UserAccount | null;
+  isSupabaseConnected: boolean;
   signUp: (data: {
     email: string;
+    password?: string;
     anonymousAlias: string;
     dailyEncouragementEmail: boolean;
     meetingRemindersEmail: boolean;
     appPushReminders?: boolean;
-  }) => UserAccount;
-  login: (email: string, alias?: string) => void;
-  logout: () => void;
+  }) => Promise<UserAccount>;
+  login: (email: string, password?: string, alias?: string) => Promise<void>;
+  logout: () => Promise<void>;
   updateNotificationPreferences: (
     prefs: Partial<
       Pick<
@@ -60,10 +70,10 @@ interface RecoveryContextType {
   streakBanner: string | null;
   dismissStreakBanner: () => void;
   completeMeeting: (meetingId?: string) => void;
-  resetStreak: () => void;
+  resetStreak: () => Promise<void>;
   weekRecords: DayRecord[];
   communityMessages: CommunityMessage[];
-  sendCommunityMessage: (text: string) => void;
+  sendCommunityMessage: (text: string) => Promise<void>;
   peerChats: PeerChat[];
   sendPersonalMessage: (chatId: string, text: string) => void;
   toggleSponsor: (chatId: string) => void;
@@ -98,52 +108,169 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
   const [activePeerChatId, setActivePeerChatId] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
-  // Load from localStorage asynchronously to avoid synchronous effect cascading render
-  useEffect(() => {
-    queueMicrotask(() => {
-      try {
-        const storedUser = localStorage.getItem(STORAGE_KEY_USER);
-        const storedStreak = localStorage.getItem(STORAGE_KEY_STREAK);
-        const storedAttended = localStorage.getItem(STORAGE_KEY_ATTENDED_TODAY);
-        const storedComm = localStorage.getItem(STORAGE_KEY_COMMUNITY);
-        const storedChats = localStorage.getItem(STORAGE_KEY_CHATS);
+  // Helper to compute streak count from a streak_start timestamp
+  const calculateStreakFromDate = (streakStart: string): number => {
+    try {
+      const diffMs = Date.now() - new Date(streakStart).getTime();
+      const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      return Math.max(1, days + 1);
+    } catch {
+      return 1;
+    }
+  };
 
-        if (storedUser) {
-          try {
-            setUser(JSON.parse(storedUser));
-          } catch {
-            // fallback
+  // 1. Initial Load & Hydration (from Supabase if available, else localStorage)
+  useEffect(() => {
+    queueMicrotask(async () => {
+      try {
+        if (isSupabaseConfigured && supabase) {
+          // Check real Supabase Auth session
+          const {
+            data: { session },
+          } = await supabase.auth.getSession();
+
+          if (session?.user) {
+            const { data } = await supabase
+              .from("profiles")
+              .select("*")
+              .eq("id", session.user.id)
+              .maybeSingle();
+
+            const profile = data as Profile | null;
+
+            if (profile) {
+              const streakDays = calculateStreakFromDate(profile.streak_start);
+              setStreak(streakDays);
+              setUser({
+                id: profile.id,
+                email: profile.email,
+                anonymousAlias: profile.alias,
+                dailyEncouragementEmail: true,
+                meetingRemindersEmail: true,
+                appPushReminders: false,
+                isAuthenticated: true,
+                createdAt: profile.created_at,
+                streak_start: profile.streak_start,
+              });
+            }
           }
-        }
-        if (storedStreak !== null) {
-          setStreak(parseInt(storedStreak, 10) || 4);
-        }
-        if (storedAttended !== null) {
-          setAttendedToday(storedAttended === "true");
-        }
-        if (storedComm) {
-          try {
-            setCommunityMessages(JSON.parse(storedComm));
-          } catch {
-            // fallback
+
+          // Fetch real group messages from Supabase
+          const { data: remoteMessages } = await supabase
+            .from("group_messages")
+            .select("*")
+            .order("created_at", { ascending: true })
+            .limit(50);
+
+          const rows = remoteMessages as GroupMessageRow[] | null;
+
+          if (rows && rows.length > 0) {
+            const formatted: CommunityMessage[] = rows.map((row) => ({
+              id: row.id,
+              sender: row.alias,
+              dayCount: 1,
+              avatarColor: "#FF5A00",
+              text: row.content,
+              time: new Date(row.created_at).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+              isSelf: session?.user?.id === row.user_id,
+            }));
+            setCommunityMessages(formatted);
           }
-        }
-        if (storedChats) {
-          try {
-            setPeerChats(JSON.parse(storedChats));
-          } catch {
-            // fallback
+        } else {
+          // Supabase not configured yet: load from localStorage
+          const storedUser = localStorage.getItem(STORAGE_KEY_USER);
+          const storedStreak = localStorage.getItem(STORAGE_KEY_STREAK);
+          const storedAttended = localStorage.getItem(STORAGE_KEY_ATTENDED_TODAY);
+          const storedComm = localStorage.getItem(STORAGE_KEY_COMMUNITY);
+          const storedChats = localStorage.getItem(STORAGE_KEY_CHATS);
+
+          if (storedUser) {
+            try {
+              setUser(JSON.parse(storedUser));
+            } catch {
+              // fallback
+            }
+          }
+          if (storedStreak !== null) {
+            setStreak(parseInt(storedStreak, 10) || 4);
+          }
+          if (storedAttended !== null) {
+            setAttendedToday(storedAttended === "true");
+          }
+          if (storedComm) {
+            try {
+              setCommunityMessages(JSON.parse(storedComm));
+            } catch {
+              // fallback
+            }
+          }
+          if (storedChats) {
+            try {
+              setPeerChats(JSON.parse(storedChats));
+            } catch {
+              // fallback
+            }
           }
         }
       } catch {
-        // storage disabled or restricted
+        // storage disabled or offline
       } finally {
         setIsHydrated(true);
       }
     });
   }, []);
 
-  // Sync to localStorage
+  // 2. Realtime Subscription for Group Messages
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    const channel = supabase
+      .channel("group_messages_realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "group_messages",
+        },
+        (payload) => {
+          const newRow = payload.new as GroupMessageRow;
+          const timeStr = new Date(newRow.created_at).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+
+          setCommunityMessages((prev) => {
+            // Prevent duplicate message if already added locally
+            if (prev.some((m) => m.id === newRow.id)) return prev;
+            return [
+              ...prev,
+              {
+                id: newRow.id,
+                sender: newRow.alias,
+                dayCount: 1,
+                avatarColor: "#FF5A00",
+                text: newRow.content,
+                time: timeStr,
+                isSelf: user?.id === newRow.user_id,
+              },
+            ];
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (supabase) {
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [user?.id]);
+
+  // Sync state to localStorage for offline access
   useEffect(() => {
     if (!isHydrated) return;
     try {
@@ -167,24 +294,70 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user, streak, attendedToday, communityMessages, peerChats, isHydrated]);
 
+  // Auth: Sign Up with Supabase and insert Profile
   const signUp = useCallback(
-    (data: {
+    async (data: {
       email: string;
+      password?: string;
       anonymousAlias: string;
       dailyEncouragementEmail: boolean;
       meetingRemindersEmail: boolean;
       appPushReminders?: boolean;
     }) => {
+      const email = data.email.trim().toLowerCase();
+      const alias =
+        data.anonymousAlias.trim() ||
+        `Anonymous #${Math.floor(100 + Math.random() * 900)}`;
+      const now = new Date().toISOString();
+
+      if (isSupabaseConfigured && supabase) {
+        const password = data.password || "RecoveryPass2026!";
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email,
+          password,
+        });
+
+        if (authError && !authData?.user) {
+          throw new Error(authError.message);
+        }
+
+        const userId = authData?.user?.id;
+        if (userId) {
+          // Insert profile into public.profiles
+          await supabase.from("profiles").upsert({
+            id: userId,
+            email,
+            alias,
+            streak_start: now,
+          });
+
+          const newUser: UserAccount = {
+            id: userId,
+            email,
+            anonymousAlias: alias,
+            dailyEncouragementEmail: data.dailyEncouragementEmail,
+            meetingRemindersEmail: data.meetingRemindersEmail,
+            appPushReminders: data.appPushReminders ?? false,
+            isAuthenticated: true,
+            createdAt: now,
+            streak_start: now,
+          };
+          setUser(newUser);
+          setStreak(1);
+          return newUser;
+        }
+      }
+
+      // Local storage fallback
       const newUser: UserAccount = {
-        email: data.email.trim().toLowerCase(),
-        anonymousAlias:
-          data.anonymousAlias.trim() ||
-          `Anonymous #${Math.floor(100 + Math.random() * 900)}`,
+        email,
+        anonymousAlias: alias,
         dailyEncouragementEmail: data.dailyEncouragementEmail,
         meetingRemindersEmail: data.meetingRemindersEmail,
         appPushReminders: data.appPushReminders ?? false,
         isAuthenticated: true,
-        createdAt: new Date().toISOString(),
+        createdAt: now,
+        streak_start: now,
       };
       setUser(newUser);
       return newUser;
@@ -192,10 +365,54 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     []
   );
 
+  // Auth: Log In with Supabase
   const login = useCallback(
-    (email: string, alias?: string) => {
+    async (email: string, password?: string, alias?: string) => {
+      const cleanEmail = email.trim().toLowerCase();
+
+      if (isSupabaseConfigured && supabase) {
+        const pass = password || "RecoveryPass2026!";
+        const { data: authData, error } =
+          await supabase.auth.signInWithPassword({
+            email: cleanEmail,
+            password: pass,
+          });
+
+        if (error) {
+          throw new Error(error.message);
+        }
+
+        if (authData.user) {
+          const { data } = await supabase
+            .from("profiles")
+            .select("*")
+            .eq("id", authData.user.id)
+            .maybeSingle();
+
+          const profile = data as Profile | null;
+
+          if (profile) {
+            const streakDays = calculateStreakFromDate(profile.streak_start);
+            setStreak(streakDays);
+            setUser({
+              id: profile.id,
+              email: profile.email,
+              anonymousAlias: profile.alias,
+              dailyEncouragementEmail: true,
+              meetingRemindersEmail: true,
+              appPushReminders: false,
+              isAuthenticated: true,
+              createdAt: profile.created_at,
+              streak_start: profile.streak_start,
+            });
+            return;
+          }
+        }
+      }
+
+      // Fallback
       const existing = user || {
-        email: email.trim().toLowerCase(),
+        email: cleanEmail,
         anonymousAlias: alias || "Anonymous Peer",
         dailyEncouragementEmail: true,
         meetingRemindersEmail: true,
@@ -203,22 +420,21 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
         isAuthenticated: true,
         createdAt: new Date().toISOString(),
       };
-      const updated: UserAccount = {
-        ...existing,
-        email: email.trim().toLowerCase(),
-        isAuthenticated: true,
-      };
-      setUser(updated);
+      setUser({ ...existing, email: cleanEmail, isAuthenticated: true });
     },
     [user]
   );
 
-  const logout = useCallback(() => {
+  // Auth: Sign Out
+  const logout = useCallback(async () => {
+    if (isSupabaseConfigured && supabase) {
+      await supabase.auth.signOut();
+    }
     setUser(null);
   }, []);
 
   const updateNotificationPreferences = useCallback(
-    (
+    async (
       prefs: Partial<
         Pick<
           UserAccount,
@@ -230,8 +446,15 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
       >
     ) => {
       setUser((prev) => (prev ? { ...prev, ...prefs } : null));
+
+      if (isSupabaseConfigured && supabase && user?.id && prefs.anonymousAlias) {
+        await supabase
+          .from("profiles")
+          .update({ alias: prefs.anonymousAlias })
+          .eq("id", user.id);
+      }
     },
-    []
+    [user]
   );
 
   const dismissStreakBanner = useCallback(() => {
@@ -248,15 +471,25 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     setActiveAudioMeeting(null);
   }, [attendedToday]);
 
-  const resetStreak = useCallback(() => {
+  const resetStreak = useCallback(async () => {
+    const now = new Date().toISOString();
     setStreak(1);
     setAttendedToday(false);
     setStreakBanner("Streak reset with honesty. Recovery begins again today.");
-  }, []);
 
+    if (isSupabaseConfigured && supabase && user?.id) {
+      await supabase
+        .from("profiles")
+        .update({ streak_start: now })
+        .eq("id", user.id);
+    }
+  }, [user]);
+
+  // Send Community Message with Supabase Database Insert
   const sendCommunityMessage = useCallback(
-    (text: string) => {
+    async (text: string) => {
       if (!text.trim()) return;
+      const cleanText = text.trim();
       const now = new Date();
       const timeStr = now.toLocaleTimeString([], {
         hour: "2-digit",
@@ -265,19 +498,48 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
 
       const senderName = user?.anonymousAlias || "You";
 
+      if (isSupabaseConfigured && supabase && user?.id) {
+        const { data, error } = await supabase
+          .from("group_messages")
+          .insert({
+            user_id: user.id,
+            alias: senderName,
+            content: cleanText,
+          })
+          .select()
+          .single();
+
+        const inserted = data as GroupMessageRow | null;
+
+        if (!error && inserted) {
+          const newMsg: CommunityMessage = {
+            id: inserted.id,
+            sender: senderName,
+            dayCount: streak,
+            avatarColor: "#FF5A00",
+            text: cleanText,
+            time: timeStr,
+            isSelf: true,
+          };
+          setCommunityMessages((prev) => [...prev, newMsg]);
+          return;
+        }
+      }
+
+      // Local fallback
       const newMessage: CommunityMessage = {
         id: `comm-user-${Date.now()}`,
         sender: senderName,
         dayCount: streak,
         avatarColor: "#FF5A00",
-        text: text.trim(),
+        text: cleanText,
         time: timeStr,
         isSelf: true,
       };
 
       setCommunityMessages((prev) => [...prev, newMessage]);
     },
-    [streak, user?.anonymousAlias]
+    [streak, user]
   );
 
   const sendPersonalMessage = useCallback(
@@ -309,7 +571,7 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
         })
       );
 
-      // Simulate a calm, realistic peer response after 1.8 seconds
+      // Simulate a calm peer response after 1.8 seconds
       setTimeout(() => {
         const replyTime = new Date().toLocaleTimeString([], {
           hour: "2-digit",
@@ -400,6 +662,7 @@ export function RecoveryProvider({ children }: { children: React.ReactNode }) {
     <RecoveryContext.Provider
       value={{
         user,
+        isSupabaseConnected: isSupabaseConfigured,
         signUp,
         login,
         logout,
